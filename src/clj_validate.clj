@@ -1,91 +1,58 @@
-;   Copyright (c) Philipp Meier. All rights reserved.
-;   The use and distribution terms for this software are covered by the
-;   Eclipse Public License 1.0 (http://opensource.org/licenses/eclipse-1.0.php)
-;   which can be found in the file epl-v10.html at the root of this distribution.
-;   By using this software in any fashion, you are agreeing to be bound by
-;   the terms of this license.
-;   You must not remove this notice, or any other, from this software.
-
 (ns clj-validate
   "A library to build validation functions that validate clojure data structures
    against certain conditions."
-  (:use clojure.contrib.seq-utils)
   (:use clojure.test))
-
-(def +default-level-order+ [:info :warning :error :critical])
-
-(defn level-pos
-  ([l] "Returns the position of the supplied keyword in the default level order"
-     (level-pos l +default-level-order+))
-  ([l lo]"Returns the position of the supplied keyword in the given level order"
-   (or ((zipmap lo (iterate inc 0)) l) -1)))
-
-(with-test
-  (defn max-level 
-    ([levels level-order]
-       (apply max-key #(level-pos % level-order) levels))
-    ([levels]
-       (max-level levels +default-level-order+)))
-
-  (testing "single"
-    (is (= :foo (max-level [:foo]))))
-  (testing "maxing" 
-    (is (= :critical (max-level [:warning :critical :foo])))
-    (is (= :warning  (max-level [:warning :warning :info]))))
-  (testing "custom levelmap"
-    (is (= :foo (max-level [:foo :bar :baz] [:baz :bar :foo])))))
-
 
 (with-test 
   (defn combine [& rs]    
-    "Combines a list of results to a result with a level being the maximum level
-     of the individual results. The reason if the result will be the result list.
+    "Combines a list of results to a result which references the results as causes.
 
-     Example: =((combine { :level :warning :info foo} { :level :error :info :boo})
-                { :level :error :reason [{:level :warning :info :foo}
-                                         {:level :error :info :boo}]})"
+     Example: =((combine {:info foo} {:info :boo})
+                {:cause [{:info :foo}
+                         {:info :boo}]})"
 
-    (let [rs (filter (comp not nil?) rs)]
-      (if (empty? rs) nil 
-	   (let [level (max-level (map :level rs))]
-	     {:level level :reason (vec rs)}))))
+    (let [rs (remove nil? rs)]
+      (if-not (empty? rs)
+        {:cause rs})))
 
-  (let [e {:level :error :reason :e}
-	w {:level :warning :reason :w}]
+  (let [e {:cause :e}
+	w {:cause :w}]
     (testing "empty and nils"
       (is (nil? (combine)) "empty")
       (is (nil? (combine nil)) "nil")
       (is (nil? (combine nil nil)) "nils"))
     (testing "single"
-      (is (= {:level :error :reason [e]}
-	     (combine e)) "error")
-      (is (= {:level :warning :reason [w]}
-	     (combine w)) "reason"))
-    (testing "multiple"
-      (is (= {:level :error :reason [e w]} (combine e w)) "error warning")
-      (is (= {:level :error :reason [w e]} (combine w e)) "warning error"))
-    (testing "some nil"
-      (is (= {:level :error :reason [e w]} (combine e nil w)) "error nil warning"))))
+      (is (= {:cause [e]} (combine e))))
+    (testing "multiple preserves order"
+      (is (= {:cause [e w]} (combine e w)))
+      (is (= {:cause [w e]} (combine w e))))
+    (testing "some nil are filtered"
+      (is (= {:cause [e w]} (combine e nil w))))))
 
 (defn validate 
   ([f name x]
      (validate f name nil nil x))
   ([f name info x]
      (validate f name info nil x))
-  ([f name info reason x]
-     (when-not (f x) 
-       (-> {:level :error}
-	   (#(if name (assoc % :validator name) %))
-	   (#(if reason (assoc % :reason reason) %))
-	   (#(if info (assoc % :info info) %))))))
+  ([f name info cause x]
+     (try
+       (when-not (f x)
+         (merge (when name {:validator name})
+                (when cause {:cause cause})
+                (when info {:info info})))
+       (catch Exception e
+	 {:validator name
+	  :cause :exception
+	  :info info
+	  :exception e}))))
 
 (with-test
   (defn numeric [x]
     (validate number? :numeric x))
   (testing "numeric"
-    (are (nil? (numeric 0))
-	(nil? (numeric 1/3))
-	(={:level :error :reason :numeric} (numeric "a")))))
+    (is (nil? (numeric 0)))
+    (is (nil? (numeric 1/3)))
+    (is (= {:validator :numeric} (numeric "a")))))
 
 (defn string [x]
   (validate string? :string x))
@@ -101,22 +68,34 @@
     (fn [x] (validate #(< % l) :less-than l x)))
   (testing "simple"
     (is (nil? ((less-than 5) 0)))
-    (is (= { :level :error :validator :less-than :info 5 } ((less-than 5) 10)))))
+    (is (= {:validator :less-than :info 5} ((less-than 5) 10)))))
 
 (with-test
   (defn greater-than [l] 
     (fn [x] (validate #(> % l) :greater-than l x)))
   (testing "simple"
     (is (nil? ((greater-than 0) 5)))
-    (is (= { :level :error :validator :greater-than :info 10 } ((greater-than 10) 5)))))
+    (is (= {:validator :greater-than :info 10} ((greater-than 10) 5)))))
+
+(with-test
+  (defn in-range [l h] 
+    (fn [x] (validate #(<= l % h) :in-range [l h] x)))
+  (testing "simple"
+    (is (nil? ((in-range 4 6) 5)))
+    (is (nil? ((in-range 5 5) 5)))
+    (is (nil? ((in-range 4 5) 5)))
+    (is (nil? ((in-range 5 6) 5)))
+    (is (= {:validator :in-range :info [3 4]} ((in-range 3 4) 5)))
+    (is (= {:validator :in-range :info [6 7]} ((in-range 6 7) 5)))))
+
 (with-test
   (defn applied [f validator name]
     (fn [x] (if-let [rs (combine (validator (f x)))]
 	      (assoc rs :validator name))))
   (testing "count"
     (is (nil? ((applied count (less-than 5) :count) [1 2 3 4])))
-    (is (= {:level :error :validator :count 
-	    :reason [{:level :error :validator :less-than :info 5}] } 
+    (is (= {:validator :count 
+	    :cause [{:validator :less-than :info 5}] } 
 	   ((applied count (less-than 5) :count) [1 2 3 4 5])))))
 
 (with-test
@@ -125,22 +104,23 @@
 	      (assoc rs :validator :all))))
   (testing "single"
     (is (nil? ((all numeric) 5)))
-    (is (= {:level :error :validator :all :reason [{:level :error :validator :numeric}]}
+    (is (= {:validator :all :cause [{:validator :numeric}]}
 	   ((all numeric) "a"))))
   (testing "multiple"
     (is (nil? ((all numeric odd) 5)))
-    (is (= {:level :error :validator :all :reason [{:level :error :validator :odd}
-						   {:level :error :validator :less-than :info 5}]}
+    (is (= {:validator :all :cause [{:validator :odd}
+                                     {:validator :less-than :info 5}]}
 	   ((all odd (less-than 5)) 20)))))
 
-(defn is-not [name validator]
-  (fn [x] (when-not (validator x)
-	    { :level :error :validator not :reason name })))
+(with-test
+  (defn is-not [name validator]
+    (fn [x] (if-not (validator x)
+             {:validator name})))
+  (testing "in-not"
+    (is (nil? ((is-not :non-numeric numeric) "a")))
+    (is (= {:validator :non-numeric}
+           ((is-not :non-numeric numeric) 1)))))
 
-(defn coll-empty [coll]
-  (fn [x] (if (coll? x)
-	    (validate empty? :empty x)
-	    { :level :error :validator :empty :reason :not-coll })))
 
 (with-test
   (defn in [key validator]
@@ -148,41 +128,42 @@
 	      (if (contains? x key)
 		(if-let [rs (combine (validator (x key)))]
 		  (assoc rs :validator :in :info key))
-		{:level :error :validator :in :reason :not-contains :info key})
+		{:validator :in :cause :not-contains :info key})
 	      
-	      {:level :error :validator :in :reason :not-coll :info x})))
+	      {:validator :in :cause :not-coll :info key})))
 
   (testing "map"
     (is (nil? ((in :a numeric) { :a 1 })))
     (is (nil? ((in :a numeric) { :a 1 :b 2})))
-    (is (= { :level :error :validator :in :reason [{:level :error :validator :numeric}] :info :a}
+    (is (= {:validator :in :cause [{:validator :numeric}] :info :a}
 	   ((in :a numeric) { :a "a"})))
-    (is (= { :level :error :validator :in :reason :not-contains :info :a}
+    (is (= {:validator :in :cause :not-contains :info :a}
 	   ((in :a numeric) {})))))
 
 (with-test
-  (defn all-in-coll [validator]
-    (fn [coll] (if (coll? coll)
-		 (if-let [rs (apply combine (map #(if-let [r (validator (coll %))]
-						    (assoc r :key %)) 
-						 (range (count coll))))]
-		   (assoc rs :validator :coll))
-		 { :level :error :validator :all-in-coll :reason :not-coll :info coll})))
+  (defn all-in-seq [validator]
+    (fn [seq] (if (sequential? seq)
+               (if-let [rs (apply combine
+                                  (map-indexed #(if-let [r (validator %2)]
+                                                  (assoc r :index %1))
+                                               seq))]
+		   (assoc rs :validator :all-in-seq))
+               {:validator :all-in-seq :info :not-sequential})))
   (testing "valid"
-    (is (nil? ((all-in-coll numeric) [])) "empty")
-    (is (nil? ((all-in-coll numeric) [1])) "single")
-    (is (nil? ((all-in-coll numeric) [1 2])) "two entries"))
+    (is (nil? ((all-in-seq numeric) [])) "empty")
+    (is (nil? ((all-in-seq numeric) [1])) "single")
+    (is (nil? ((all-in-seq numeric) [1 2])) "two entries"))
   (testing "invalid"
-    (is (= {:level :error :validator :coll 
-	    :reason [{:level :error :key 0 :validator :numeric}]} 
-	   ((all-in-coll numeric) ["a"])) "single invalid")
-    (is (= {:level :error :validator :coll 
-	    :reason [{:level :error :key 0 :validator :numeric}
-		     {:level :error :key 2 :validator :numeric}]} 
-	   ((all-in-coll numeric) ["a" 1 "b"])) "two invalid")
-    (is (= {:level :error :validator :coll 
-	    :reason [{:level :error :key 1 :validator :numeric}]} 
-	   ((all-in-coll numeric) [1 "a" 2])) "invalid and valid")))
+    (is (= ((all-in-seq numeric) "a")
+           {:validator :all-in-seq :info :not-sequential})
+        "not a coll")
+    (is (= {:validator :all-in-seq :cause [{:index 0 :validator :numeric}]} 
+	   ((all-in-seq numeric) ["a"])) "single invalid")
+    (is (= {:validator :all-in-seq :cause [{:index 0 :validator :numeric}
+                                           {:index 2 :validator :numeric}]} 
+	   ((all-in-seq numeric) ["a" 1 "b"])) "two invalid")
+    (is (= {:validator :all-in-seq :cause [{:index 1 :validator :numeric}]} 
+	   ((all-in-seq numeric) [1 "a" 2])) "invalid and valid")))
 
 (with-test
   (defn is-equal [e]
@@ -190,7 +171,7 @@
        (assoc rs :info e)))
   (testing "simple"
     (is (nil? ((is-equal :a) :a)) "valid")
-    (is (= {:level :error :validator :is-equal :info :a}
+    (is (= {:validator :is-equal :info :a}
 	   ((is-equal :a) :b)))))
 
 (with-test
@@ -198,32 +179,27 @@
     (fn [coll] (validate #(contains? % key) :contains key coll)))
   (testing "simple"
     (is (nil? ((coll-contains :a) { :a 1 })))
-    (is (= {:level :error :validator :contains :info :a} ((coll-contains :a) { :b 1 })))))
+    (is (= {:validator :contains :info :a} ((coll-contains :a) { :b 1 })))))
 
-(def positive (partial validate pos? :positive))
-(defn not-equal [v] (partial validate (partial not= v) :not-equal v))
+(defn positive [x] (validate pos? :positive x))
+(defn negative [x] (validate neg? :positive x))
+(defn not-equal [x] (fn [y] (validate #(not= x %) :not-equal x y)))
+(defn empty [seq] (validate empty? :empty seq))
+(defn not-empty [seq] (validate #(not (empty? %)) :not-empty seq))
 
 (with-test
   (defn any [& validators]
     (fn [x] (let [rs (map #(% x) validators)]
 	      (if-not (or (empty? rs) (some nil? rs))
 		(let [rs (apply combine rs)]
-		  (assoc rs :validator :or :reason (:reason rs)))))))
+		  (assoc rs :validator :any :cause (:cause rs)))))))
   (testing "simple"
     (is (nil? ((any) :dummy)) "not validators")
     (is (nil? ((any numeric) 1)) "single valid")
     (is (nil? ((any numeric positive) 1)) "multiple valid")
-    (is (= {:level :error :validator :or :reason [{:level :error :validator :odd}]}
-	   ((any odd) -2)) "single invalid")
-    (is (= {:level :error :validator :or :reason [{:level :error :validator :positive}
-						  {:level :error :validator :odd}]}
-	   ((any positive odd) -2))) "multpile invalid"))
-
-(defn with-level [level v]
-  #(if-let [rs (v %)]
-     (assoc rs :level level)))
-
-(defn warn [v & args]
-  (with-level :warn (apply v args)))
-
-(run-tests)
+    (is (= {:validator :any :cause [{:validator :odd}]}
+	   ((any odd) 2)) "single invalid")
+    (is (= {:validator :any :cause [{:validator :positive}
+                                    {:validator :odd}]}
+	   ((any positive odd) -2))) "multpile invalid")
+    (is (nil? ((any odd negative) 1)) "single invalid amoung valid"))
