@@ -125,18 +125,19 @@
 (with-test
   (defn in [key validator]
     (fn [x] (if (coll? x)
-	      (if (contains? x key)
-		(if-let [rs (combine (validator (x key)))]
-		  (assoc rs :validator :in :info key))
-		{:validator :in :cause :not-contains :info key})
-	      
-	      {:validator :in :cause :not-coll :info key})))
+             (if (contains? x key)
+               (if-let [rs (combine (validator (get x key)))]
+                 (assoc rs :validator :in :info key))
+               {:validator :in :cause :not-contains :info key})
+             {:validator :in :cause :not-coll :info key})))
 
   (testing "map"
     (is (nil? ((in :a numeric) { :a 1 })))
     (is (nil? ((in :a numeric) { :a 1 :b 2})))
     (is (= {:validator :in :cause [{:validator :numeric}] :info :a}
 	   ((in :a numeric) { :a "a"})))
+    (is (= {:validator :in :cause [{:validator :numeric}] :info :a}
+	   ((in :a numeric) { :a nil})))
     (is (= {:validator :in :cause :not-contains :info :a}
 	   ((in :a numeric) {})))))
 
@@ -186,6 +187,7 @@
 (defn not-equal [x] (fn [y] (validate #(not= x %) :not-equal x y)))
 (defn empty [seq] (validate empty? :empty seq))
 (defn not-empty [seq] (validate #(not (empty? %)) :not-empty seq))
+(defn matches [re] (fn [x] (validate #(re-matches re %) :matches re x)))
 
 (with-test
   (defn any [& validators]
